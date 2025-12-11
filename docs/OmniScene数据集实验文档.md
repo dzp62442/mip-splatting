@@ -107,7 +107,7 @@
 ## 5. 运行脚本 `scripts/run_omniscene.py`
 1. **参数**（初步设定）：
    - `--data_root`（默认 `~/Projects/datasets/OmniScene/interp_12Hz_trainval`）
-   - `--cache_root`（默认 `comp_svfgs/output_omniscene`）
+   - `--cache_root`（默认 `output`，脚本内部写入 `output/omniscene_cache/...`）
    - `--resolution`（枚举 `112x200` / `224x400`）
    - `--stage`（默认 `val`）
    - `--output_dir`（训练结果保存目录，例如 `benchmark_omniscene`）
