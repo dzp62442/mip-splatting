@@ -88,7 +88,10 @@ class OmniSceneLoader:
         return self.stage_tokens
 
     def prepare_scene(self, token: str, force_rebuild: bool = False) -> Path:
-        scene_dir = self.cache_root / "omniscene_cache" / self.resolution_tag / token
+        tokens = list(self.list_tokens())
+        index = tokens.index(token)
+        scene_name = f"{index+1:02d}_{token}"
+        scene_dir = self.cache_root / "omniscene_cache" / self.resolution_tag / scene_name
         meta_path = scene_dir / "meta.json"
         expected_meta = {
             "token": token,

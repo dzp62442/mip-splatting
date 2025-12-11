@@ -119,9 +119,11 @@ def main():
     loader = OmniSceneLoader(cfg)
 
     jobs = []
-    for token in loader.list_tokens():
+    tokens = list(loader.list_tokens())
+    for idx, token in enumerate(tokens):
         scene_dir = loader.prepare_scene(token, force_rebuild=args.rebuild_cache)
-        jobs.append((token, str(scene_dir)))
+        scene_name = f"{idx+1:02d}_{token}"
+        jobs.append((scene_name, str(scene_dir)))
 
     dispatch_jobs(jobs, args)
 
