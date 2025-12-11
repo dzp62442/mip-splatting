@@ -36,15 +36,14 @@ We integrated an improved densification metric proposed in [Gaussian Opacity Fie
 
 # Installation
 Clone the repository and create an anaconda environment using
-```
+```shell
 git clone git@github.com:autonomousvision/mip-splatting.git
 cd mip-splatting
 
 conda create -y -n mip-splatting python=3.8
 conda activate mip-splatting
 
-pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 -f https://download.pytorch.org/whl/torch_stable.html
-conda install cudatoolkit-dev=11.3 -c conda-forge
+conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch
 
 pip install -r requirements.txt
 
@@ -63,7 +62,7 @@ python convert_blender_data.py --blender_dir nerf_synthetic/ --out_dir multi-sca
 Please download the data from the [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) and request the authors for the treehill and flowers scenes.
 
 # Training and Evaluation
-```
+```shell
 # single-scale training and multi-scale testing on NeRF-synthetic dataset
 python scripts/run_nerf_synthetic_stmt.py 
 
