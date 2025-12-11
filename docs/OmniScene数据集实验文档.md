@@ -1,6 +1,6 @@
 # OmniScene 数据集实验规划（mip-splatting）
 
-> 目标：基于 depthsplat（前馈高斯）已有的 OmniScene 数据制作流程，在 mip-splatting（逐场景优化）中以 **Blender JSON** 的形式复用同样的 10 个 val bin，完成训练/渲染/评估自动化。所有中间结果写入项目输出目录，保证 `PATH_PROJECT/datasets/OmniScene` 原始 500GB 数据保持只读。
+> 目标：基于 depthsplat（前馈高斯）已有的 OmniScene 数据制作流程，在 mip-splatting（逐场景优化）中以 **Blender JSON** 的形式复用同样的 10 个 val bin，完成训练/渲染/评估自动化。所有中间结果写入项目输出目录，保证 `PATH_PROJECT/datasets/omniscene` 原始 500GB 数据保持只读。
 
 ---
 
@@ -43,7 +43,7 @@
 
 ## 4. 数据加载与转换细节（`comp_svfgs/omniscene_dataset.py`）
 ### 4.1 数据源
-- 数据根：当前项目的 `datasets/OmniScene` 目录（已经通过符号链接/超链接指向真正的 500GB 原始数据）。后续脚本默认使用 `PATH_PROJECT/datasets/OmniScene`，若需切换可通过参数覆盖。
+- 数据根：当前项目的 `datasets/omniscene` 目录（已经通过符号链接/超链接指向真正的 500GB 原始数据）。后续脚本默认使用 `PATH_PROJECT/datasets/omniscene`，若需切换可通过参数覆盖。
 - 关键文件沿 depthsplat：
   - `interp_12Hz_trainval/bins_val_3.2m.json`
   - `interp_12Hz_trainval/bin_infos_3.2m/<token>.pkl`
@@ -106,7 +106,7 @@
 
 ## 5. 运行脚本 `scripts/run_omniscene.py`
 1. **参数**（初步设定）：
-   - `--data_root`（默认 `~/Projects/datasets/OmniScene/interp_12Hz_trainval`）
+   - `--data_root`（默认 `PATH_PROJECT/datasets/omniscene`）
    - `--cache_root`（默认 `output`，脚本内部写入 `output/omniscene_cache/...`）
    - `--resolution`（枚举 `112x200` / `224x400`）
    - `--stage`（默认 `val`）
