@@ -43,7 +43,8 @@ cd mip-splatting
 conda create -y -n mip-splatting python=3.8
 conda activate mip-splatting
 
-conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch
+# 原始的 torch 1.12.1+cu113 版本太低了，CUDA 报错
+pip install torch==2.0.0 torchvision==0.15.1 torchaudio==2.0.1 --index-url https://download.pytorch.org/whl/cu118
 
 pip install -r requirements.txt
 
