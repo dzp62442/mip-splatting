@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument("--resolution", type=parse_resolution, default="112x200", help="Target resolution HxW.")
     parser.add_argument("--output_dir", type=str, default="output/omniscene_runs", help="Directory to store training outputs.")
     parser.add_argument("--kernel_size", type=float, default=0.1)
+    parser.add_argument("--iterations", type=int, default=10_000, help="Number of training iterations.")
     parser.add_argument("--gpus", type=str, default=None, help="Comma separated GPU ids. Defaults to auto detection.")
     parser.add_argument("--max_workers", type=int, default=4)
     parser.add_argument("--dry_run", action="store_true")
@@ -50,6 +51,7 @@ def train_scene(gpu, scene_token, scene_dir, args):
     train_cmd = (
         f"{base_env}python train.py "
         f"-s {scene_dir} -m {model_root} --eval --port {6009 + int(gpu)} "
+        f"--iterations {args.iterations} "
         f"--kernel_size {args.kernel_size} -r 1"
     )
     render_cmd = f"{base_env}python render.py -m {model_root} --skip_train"
