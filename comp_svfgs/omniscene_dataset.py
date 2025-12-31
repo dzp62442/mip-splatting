@@ -138,6 +138,8 @@ class OmniSceneLoader:
             camera_angle_x,
         )
 
+        self._write_depth_point_cloud(train_views, scene_dir / "points3d.ply")
+
         meta_path.write_text(json.dumps(expected_meta, indent=2))
         return scene_dir
 
@@ -202,6 +204,25 @@ class OmniSceneLoader:
         cx = intrinsics[0, 2] * scale_w
         cy = intrinsics[1, 2] * scale_h
 
+        depth_path = (
+            base_path.replace("samples", "samples_dptm_small")
+            .replace("sweeps", "sweeps_dptm_small")
+            .replace(".jpg", "_dpt.npy")
+            .replace(".png", "_dpt.npy")
+        )
+        conf_path = depth_path.replace("_dpt.npy", "_conf.npy")
+        depth = None
+        conf = None
+        if Path(depth_path).exists() and Path(conf_path).exists():
+            depth_np = np.load(depth_path).astype(np.float32)
+            conf_np = np.load(conf_path).astype(np.float32)
+            depth_img = Image.fromarray(depth_np)
+            conf_img = Image.fromarray(conf_np)
+            depth_np = np.array(depth_img.resize((target_w, target_h), Image.BILINEAR))
+            conf_np = np.array(conf_img.resize((target_w, target_h), Image.BILINEAR))
+            depth = depth_np
+            conf = conf_np
+
         return {
             "image": np_img,
             "fx": fx,
@@ -210,6 +231,8 @@ class OmniSceneLoader:
             "cy": cy,
             "width": target_w,
             "height": target_h,
+            "depth": depth,
+            "confidence": conf,
         }
 
     def _collect_train_views(self, bin_info: Dict) -> List[Dict]:
@@ -229,6 +252,8 @@ class OmniSceneLoader:
                     "cy": img_data["cy"],
                     "width": img_data["width"],
                     "height": img_data["height"],
+                    "depth": img_data.get("depth"),
+                    "confidence": img_data.get("confidence"),
                 }
             )
         return views
@@ -289,3 +314,72 @@ class OmniSceneLoader:
 
         payload = {"camera_angle_x": camera_angle_x, "frames": frames}
         json_path.write_text(json.dumps(payload, indent=2))
+
+    def _write_depth_point_cloud(self, views: List[Dict], ply_path: Path):
+        all_points = []
+        all_colors = []
+        for view in views:
+            depth = view.get("depth")
+            confidence = view.get("confidence")
+            if depth is None or confidence is None:
+                continue
+            mask = confidence > 0.3
+            if not np.any(mask):
+                continue
+
+            depth_masked = depth[mask]
+            yy, xx = np.indices(depth.shape)
+            xx = xx[mask]
+            yy = yy[mask]
+
+            fx = view["fx"]
+            fy = view["fy"]
+            cx = view["cx"]
+            cy = view["cy"]
+
+            x = (xx - cx) * depth_masked / fx
+            y = (yy - cy) * depth_masked / fy
+            z = depth_masked
+            ones = np.ones_like(z)
+            pts_cam = np.stack([x, y, z, ones], axis=1)
+
+            c2w = view["transform_matrix"]
+            pts_world = (c2w @ pts_cam.T).T[:, :3]
+
+            colors = view["image"][mask]
+
+            all_points.append(pts_world)
+            all_colors.append(colors)
+
+        if not all_points:
+            return
+
+        pts = np.concatenate(all_points, axis=0)
+        cols = np.concatenate(all_colors, axis=0)
+
+        dtype = [
+            ("x", "f4"),
+            ("y", "f4"),
+            ("z", "f4"),
+            ("nx", "f4"),
+            ("ny", "f4"),
+            ("nz", "f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+        ]
+        vertices = np.zeros(pts.shape[0], dtype=dtype)
+        vertices["x"] = pts[:, 0]
+        vertices["y"] = pts[:, 1]
+        vertices["z"] = pts[:, 2]
+        vertices["red"] = cols[:, 0]
+        vertices["green"] = cols[:, 1]
+        vertices["blue"] = cols[:, 2]
+
+        try:
+            from plyfile import PlyData, PlyElement
+
+            ply = PlyData([PlyElement.describe(vertices, "vertex")])
+            ply.write(ply_path)
+        except ImportError:
+            ply_path.write_text("")

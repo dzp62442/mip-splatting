@@ -89,11 +89,17 @@
 - `file_path` 不带扩展名，mip-splatting loader 会自动加 `.png`。
 - 虽然 `Scene` 当前未使用 `near/far`，但写入固定值可以保持一致性。
 
-### 4.4 图像与掩码处理
+### 4.4 图像、深度、掩码与初始点云
 - 复用 depthsplat `load_conditions` 逻辑：读取 JPG、同步更新 intrinsics、输出 numpy/tensor。
 - resize 尺寸：默认 112x200，可通过 `resolution_hw` 参数切到 224x400。
 - 输出图像保存为 `PNG`（避免重复压缩）。命名规则：`{split}/{idx:06d}.png`。
 - 动态掩码：当前 mip-splatting 未用到，可先不落地；若后续需要，可在 JSON 中增加 `mask_path` 字段或单独保存 `masks_train/`、`masks_test/`。
+- **绝对尺度深度**：
+  - 参考 SVF-GS (`data/transforms/loading.py`)，对每个视角读取 Metric3D 生成的 `samples_dptm_small/*.npy` / `*_conf.npy`（或 sweeps 同理）。
+  - resize 时与 RGB 一致，保持相机参数同步缩放。
+  - 生成初始点云：对置信度 > 0.3 的像素，将深度投影为相机坐标系 3D 点，再乘以对应的 c2w 得到世界坐标。颜色可直接来自 RGB（与 mip-splatting 初始化格式一致：位置 + RGB→SH0 + 法线 0）。
+  - 将所有有效点累积，写成 `points3d.ply`，放在每个场景目录根部，供 `Scene` 在初始化时加载；若深度为空或数量过少，可回退到随机点云。
+  - 若未来需要针对点云进一步过滤（例如 mask），可把置信度<=0.3 的像素作为“无效”直接不写入点云；如需保留 mask，可在 `meta.json` 中记录 `depth_mask_path`。
 
 ### 4.5 缓存策略
 - `OmniSceneLoader.prepare_scene(token)`：
@@ -146,8 +152,8 @@
 | 模块 | depthsplat 行为 | mip-splatting 需求 | 当前方案 |
 | --- | --- | --- | --- |
 | near/far | loader 决定，模型使用 | 可选 | JSON 中写入固定 0.01/100 以备未来使用 |
-| mask | train.step 中用于剔除动态区域 | 暂无接口 | 初期忽略；若需要可扩展 render/metrics 支持 mask |
-| 初始点云 | 模型内生成 | mip-splatting 读取 PLY；若无则随机 | Blender loader 若搜不到 `points3d.ply` 会自动生成随机点云，足够当前实验 |
+| mask | train.step 中用于剔除动态区域 | 暂无接口 | 初期忽略；若训练/metrics 需要可扩展 mask 字段 |
+| 初始点云 | 模型内生成 | mip-splatting 读取 PLY；若无则随机 | 由 Metric3D 深度 + 置信度>0.3 的像素投影生成 `points3d.ply`，不足时回退随机点云 |
 | 分辨率 | loader 控制 | loader + run 脚本控制 | 通过 `--resolution` 参数设置，默认 112x200 |
 | 存储 | 无需落地 | 必须写磁盘 | 使用 `cache_<reso>/<token>/` 结构 |
 
