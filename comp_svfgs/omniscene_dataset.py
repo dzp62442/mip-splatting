@@ -342,6 +342,7 @@ class OmniSceneLoader:
             z = depth_masked
             ones = np.ones_like(z)
             pts_cam = np.stack([x, y, z, ones], axis=1)
+            pts_cam[:, 1:3] *= -1.0  # OpenCV camera coordinates -> OpenGL camera coordinates
 
             c2w = view["transform_matrix"]
             pts_world = (c2w @ pts_cam.T).T[:, :3]
