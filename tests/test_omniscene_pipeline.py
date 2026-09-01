@@ -10,6 +10,25 @@ from scripts import run_omniscene
 
 
 class OmniScenePipelineTest(unittest.TestCase):
+    @staticmethod
+    def _write_completed_scene(model_root):
+        model_root.mkdir()
+        results = {
+            f"ours_{iteration}": {"PSNR": 20.0, "SSIM": 0.8, "LPIPS": 0.2}
+            for iteration in run_omniscene.CENTER150_EVAL_ITERATIONS
+        }
+        (model_root / "results.json").write_text(json.dumps(results))
+        (model_root / "training_times.json").write_text(
+            json.dumps(
+                {
+                    "elapsed_seconds": {
+                        str(iteration): float(iteration)
+                        for iteration in run_omniscene.CENTER150_EVAL_ITERATIONS
+                    }
+                }
+            )
+        )
+
     def test_center150_loader_and_scene_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -131,6 +150,29 @@ class OmniScenePipelineTest(unittest.TestCase):
                 summary["incomplete_scenes"][0]["missing_timing_iterations"],
                 [1000, 5000, 10000],
             )
+
+    def test_dispatch_does_not_sleep_between_skipped_scenes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            self._write_completed_scene(output_dir / "001_scene")
+            self._write_completed_scene(output_dir / "002_scene")
+            args = argparse.Namespace(
+                output_dir=output_dir,
+                gpus="0",
+                max_workers=1,
+                dry_run=False,
+            )
+
+            with mock.patch.object(run_omniscene.time, "sleep") as sleep:
+                failures = run_omniscene.dispatch_jobs(
+                    [("token_1", "001_scene"), ("token_2", "002_scene")],
+                    mock.Mock(),
+                    run_omniscene.CENTER150_EVAL_ITERATIONS,
+                    args,
+                )
+
+            self.assertEqual(failures, [])
+            sleep.assert_not_called()
 
 
 if __name__ == "__main__":

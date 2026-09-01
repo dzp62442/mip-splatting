@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -389,7 +389,14 @@ def dispatch_jobs(
                 future_to_job[future] = (gpu, scene_name)
                 reserved.add(gpu)
 
-            done = [future for future in future_to_job if future.done()]
+            if future_to_job:
+                done, _ = wait(
+                    tuple(future_to_job),
+                    timeout=5,
+                    return_when=FIRST_COMPLETED,
+                )
+            else:
+                done = ()
             for future in done:
                 gpu, scene_name = future_to_job.pop(future)
                 reserved.discard(gpu)
@@ -399,7 +406,7 @@ def dispatch_jobs(
                 except Exception as exc:
                     failures.append({"scene": scene_name, "error": str(exc)})
                     print(f"Job {scene_name} failed: {exc}", flush=True)
-            if (jobs or future_to_job) and not args.dry_run:
+            if jobs and not future_to_job and not done and not args.dry_run:
                 time.sleep(5)
     return failures
 
