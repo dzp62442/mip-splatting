@@ -115,10 +115,10 @@
    - `--data_root`（默认 `PATH_PROJECT/datasets/omniscene`）
    - `--cache_root`（默认 `output`，脚本内部写入 `output/omniscene_cache/...`）
    - `--resolution`（枚举 `112x200` / `224x400`）
-   - `--stage`（默认 `val`）
+   - `--stage`（默认 `center150`；需要时可切换为 `val`、`test` 等）
    - `--output_dir`（训练结果保存目录，例如 `benchmark_omniscene`）
-   - `--gpus`（可指定可用 GPU 列表，如 `0,1`）
-   - `--max_workers`（线程池大小）
+   - `--gpus`（可选；默认自动检测可用 GPU）
+   - `--max_workers`（线程池大小；单卡时无需显式设置）
    - `--dry_run`
 2. **流程**：
    1. 初始化 `OmniSceneLoader`，获取 token 列表（默认 10 个）。
@@ -143,10 +143,28 @@
 4. **分辨率控制**：
    - 因为我们提前 resize 到目标分辨率，`train.py` 里的 `-r` 固定设为 1 即可。
 5. **结果产物**：
-   - `model_root/point_cloud/iteration_30000/...`（高斯模型）
-   - `model_root/test/ours_30000/...`（渲染结果）
+   - `model_root/point_cloud/iteration_<iter>/...`（高斯模型）
+   - `model_root/test/ours_<iter>/...`（渲染结果）
    - `model_root/results.json`, `per_view.json`（metrics 输出）
    - 这些结构与现有脚本保持一致，便于对比分析。
+
+### 5.1 Center150 对比实验
+
+`center150` 与 SVF-GS 使用同一份
+`interp_12Hz_trainval/bins_center150_v1.json`：从 nuScenes val 的 150 个场景中各选择一个中央 bin。
+推荐从仓库根目录执行：
+
+```bash
+python scripts/run_omniscene.py
+```
+
+- 每个场景只训练一次，在 1k、5k、10k 保存 PLY 与训练 checkpoint。
+- 每个场景在 `training_times.json` 中记录从训练开始到 1k、5k、10k 的累计训练耗时；只统计训练循环，不包含评估、渲染、指标计算、PLY/checkpoint 写盘和断点停机时间。
+- 三个迭代点分别执行完整 test split 渲染，并把 PSNR、SSIM、LPIPS 写入场景目录下的 `results.json`。
+- 重启相同命令时，已有完整三组指标和耗时的场景会直接跳过；训练中断时从缺失里程碑之前最新的 `chkpnt*.pth` 恢复；已有渲染、指标和计时记录也会复用。
+- 所有任务结束后，在输出根目录生成 `center150_summary.json` 和 `center150_summary.csv`。二者记录各迭代点的有效场景数、150 场景平均训练耗时和平均指标；若有失败或缺失，JSON 会列出对应场景。
+- 本机使用单卡顺序执行 150 个场景，无需设置 `--max_workers`。
+- 仅当坐标变换或其他缓存生成逻辑发生变化、需要强制重建已有缓存时，额外添加 `--rebuild_cache`。
 
 ## 6. 数据加载 vs. 逐场景流程的差异点（补充）
 | 模块 | depthsplat 行为 | mip-splatting 需求 | 当前方案 |

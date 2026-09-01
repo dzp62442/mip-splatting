@@ -87,11 +87,16 @@ class OmniSceneLoader:
     def list_tokens(self) -> Sequence[str]:
         return self.stage_tokens
 
-    def prepare_scene(self, token: str, force_rebuild: bool = False) -> Path:
+    def scene_name(self, token: str) -> str:
         tokens = list(self.list_tokens())
-        index = tokens.index(token)
-        scene_name = f"{index+1:02d}_{token}"
-        scene_dir = self.cache_root / "omniscene_cache" / self.resolution_tag / scene_name
+        index_width = 3 if self.stage == "center150" else 2
+        return f"{tokens.index(token)+1:0{index_width}d}_{token}"
+
+    def scene_path(self, token: str) -> Path:
+        return self.cache_root / "omniscene_cache" / self.resolution_tag / self.scene_name(token)
+
+    def prepare_scene(self, token: str, force_rebuild: bool = False) -> Path:
+        scene_dir = self.scene_path(token)
         meta_path = scene_dir / "meta.json"
         expected_meta = {
             "token": token,
@@ -150,6 +155,13 @@ class OmniSceneLoader:
             tokens = self._read_bins("bins_train_3.2m.json")
         elif stage == "val":
             tokens = self._read_bins("bins_val_3.2m.json")[:30000:3000][:10]
+        elif stage == "center150":
+            tokens = self._read_bins("bins_center150_v1.json")
+            if len(tokens) != 150 or len(set(tokens)) != 150:
+                raise RuntimeError(
+                    "center150 split must contain exactly 150 unique bin tokens, "
+                    f"got {len(tokens)} tokens and {len(set(tokens))} unique tokens"
+                )
         elif stage == "test":
             tokens = self._read_bins("bins_val_3.2m.json")[0::14][:2048]
         elif stage == "demo":

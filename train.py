@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
 import os
 import numpy as np
 import open3d as o3d
@@ -19,6 +20,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
+import time
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 import uuid
@@ -31,6 +33,51 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+
+TRAINING_TIMES_FILENAME = "training_times.json"
+
+
+def initialize_training_timer(model_path, timing_iterations, resume_iteration):
+    timing_path = os.path.join(model_path, TRAINING_TIMES_FILENAME)
+    elapsed_seconds = {}
+    base_elapsed_seconds = 0.0
+    if resume_iteration > 0:
+        try:
+            with open(timing_path, "r") as file:
+                stored = json.load(file)
+            elapsed_seconds = stored.get("elapsed_seconds", {})
+            base_elapsed_seconds = float(elapsed_seconds[str(resume_iteration)])
+        except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Cannot resume timing from iteration {resume_iteration}: {timing_path} is missing or incomplete"
+            ) from exc
+        elapsed_seconds = {
+            key: value for key, value in elapsed_seconds.items() if int(key) <= resume_iteration
+        }
+
+    state = {
+        "unit": "seconds",
+        "scope": "cumulative training-loop wall time excluding evaluation, artifact I/O, and resume downtime",
+        "timing_iterations": sorted(set(timing_iterations)),
+        "elapsed_seconds": elapsed_seconds,
+    }
+    write_training_times(timing_path, state)
+    return timing_path, state, base_elapsed_seconds
+
+
+def write_training_times(timing_path, state):
+    temp_path = timing_path + ".tmp"
+    with open(temp_path, "w") as file:
+        json.dump(state, file, indent=2)
+        file.write("\n")
+    os.replace(temp_path, timing_path)
+
+
+def record_training_time(timing_path, state, iteration, elapsed_seconds):
+    state["elapsed_seconds"][str(iteration)] = float(elapsed_seconds)
+    write_training_times(timing_path, state)
+    print("\n[ITER {}] Cumulative training time: {:.3f} s".format(iteration, elapsed_seconds))
 
 @torch.no_grad()
 def create_offset_gt(image, offset):
@@ -47,7 +94,7 @@ def create_offset_gt(image, offset):
     image = torch.nn.functional.grid_sample(image[None], id_coords[None], align_corners=True, padding_mode="border")[0]
     return image
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, timing_iterations):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -56,6 +103,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    timing_iterations = set(timing_iterations)
+    timing_path = None
+    timing_state = None
+    timing_base_seconds = 0.0
+    timing_segment_start = None
+    timing_excluded_seconds = 0.0
+    if timing_iterations:
+        timing_path, timing_state, timing_base_seconds = initialize_training_timer(
+            scene.model_path, timing_iterations, first_iter
+        )
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -79,7 +137,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    if timing_iterations:
+        timing_segment_start = time.perf_counter()
     for iteration in range(first_iter, opt.iterations + 1):        
+        gui_start = time.perf_counter()
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -94,6 +155,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     break
             except Exception as e:
                 network_gui.conn = None
+        timing_excluded_seconds += time.perf_counter() - gui_start
 
         iter_start.record()
 
@@ -146,11 +208,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Log and save
+            # Log and save (excluded from cumulative training time)
+            non_training_start = time.perf_counter()
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, dataset.kernel_size))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+            timing_excluded_seconds += time.perf_counter() - non_training_start
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -176,9 +240,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
+            if iteration in timing_iterations:
+                torch.cuda.synchronize()
+                timing_io_start = time.perf_counter()
+                elapsed_seconds = (
+                    timing_base_seconds
+                    + timing_io_start
+                    - timing_segment_start
+                    - timing_excluded_seconds
+                )
+                record_training_time(timing_path, timing_state, iteration, elapsed_seconds)
+                timing_excluded_seconds += time.perf_counter() - timing_io_start
+
             if (iteration in checkpoint_iterations):
+                checkpoint_start = time.perf_counter()
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                timing_excluded_seconds += time.perf_counter() - checkpoint_start
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -253,6 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--timing_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -265,7 +344,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.timing_iterations)
 
     # All done
     print("\nTraining complete.")
