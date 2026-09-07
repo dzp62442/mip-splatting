@@ -25,6 +25,13 @@ from comp_svfgs.omniscene_dataset import LoaderConfig, OmniSceneLoader
 CENTER150_EVAL_ITERATIONS = (1_000, 5_000, 10_000)
 METRIC_NAMES = ("PSNR", "SSIM", "LPIPS")
 EXPECTED_TEST_VIEWS = 18
+NOVEL_TEST_VIEWS = 12
+ALL_VIEWS_SCOPE = "all_18_views"
+NOVEL_VIEWS_SCOPE = "novel_12_views"
+METRIC_SCOPE_VIEW_COUNTS = {
+    ALL_VIEWS_SCOPE: EXPECTED_TEST_VIEWS,
+    NOVEL_VIEWS_SCOPE: NOVEL_TEST_VIEWS,
+}
 CHECKPOINT_PATTERN = re.compile(r"^chkpnt(\d+)\.pth$")
 TRAINING_TIMES_FILENAME = "training_times.json"
 
@@ -116,9 +123,20 @@ def load_results(model_root: Path) -> Dict:
     return data if isinstance(data, dict) else {}
 
 
-def get_iteration_metrics(results: Dict, iteration: int) -> Optional[Dict[str, float]]:
+def get_iteration_metrics(
+    results: Dict,
+    iteration: int,
+    scope: str = ALL_VIEWS_SCOPE,
+) -> Optional[Dict[str, float]]:
     entry = results.get(f"ours_{iteration}")
     if not isinstance(entry, dict):
+        return None
+    scoped_entry = entry.get(scope)
+    if isinstance(scoped_entry, dict):
+        if scoped_entry.get("num_views") != METRIC_SCOPE_VIEW_COUNTS[scope]:
+            return None
+        entry = scoped_entry
+    elif scope != ALL_VIEWS_SCOPE:
         return None
     metrics = {}
     for name in METRIC_NAMES:
@@ -134,7 +152,112 @@ def get_iteration_metrics(results: Dict, iteration: int) -> Optional[Dict[str, f
 
 def completed_iterations(model_root: Path, eval_iterations: Sequence[int]) -> Tuple[int, ...]:
     results = load_results(model_root)
-    return tuple(iteration for iteration in eval_iterations if get_iteration_metrics(results, iteration) is not None)
+    return tuple(
+        iteration
+        for iteration in eval_iterations
+        if all(
+            get_iteration_metrics(results, iteration, scope) is not None
+            for scope in METRIC_SCOPE_VIEW_COUNTS
+        )
+    )
+
+
+def load_per_view_results(model_root: Path) -> Dict:
+    per_view_path = model_root / "per_view.json"
+    if not per_view_path.is_file():
+        return {}
+    try:
+        data = json.loads(per_view_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_per_view_metrics(
+    per_view_results: Dict,
+    iteration: int,
+    view_count: int,
+) -> Optional[Dict[str, float]]:
+    entry = per_view_results.get(f"ours_{iteration}")
+    if not isinstance(entry, dict):
+        return None
+
+    metric_values = {}
+    image_names = None
+    for name in METRIC_NAMES:
+        values = entry.get(name)
+        if not isinstance(values, dict):
+            return None
+        current_names = set(values)
+        if image_names is None:
+            image_names = current_names
+        elif current_names != image_names:
+            return None
+        metric_values[name] = values
+
+    if image_names is None or len(image_names) != EXPECTED_TEST_VIEWS:
+        return None
+    selected_names = sorted(image_names)[:view_count]
+    metrics = {}
+    for name in METRIC_NAMES:
+        try:
+            values = [float(metric_values[name][image_name]) for image_name in selected_names]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if len(values) != view_count or not all(math.isfinite(value) for value in values):
+            return None
+        metrics[name] = sum(values) / len(values)
+    return metrics
+
+
+def ensure_metric_scopes(model_root: Path, eval_iterations: Sequence[int]) -> bool:
+    """Add all-view and novel-view means to existing metric files without reevaluation."""
+    results = load_results(model_root)
+    per_view_results = load_per_view_results(model_root)
+    if not results or not per_view_results:
+        return False
+
+    changed = False
+    for iteration in eval_iterations:
+        key = f"ours_{iteration}"
+        entry = results.get(key)
+        if not isinstance(entry, dict):
+            continue
+
+        all_view_metrics = get_iteration_metrics(results, iteration, ALL_VIEWS_SCOPE)
+        per_view_all_metrics = get_per_view_metrics(
+            per_view_results, iteration, EXPECTED_TEST_VIEWS
+        )
+        novel_view_metrics = get_per_view_metrics(
+            per_view_results, iteration, NOVEL_TEST_VIEWS
+        )
+        if per_view_all_metrics is None or novel_view_metrics is None:
+            continue
+        if all_view_metrics is None:
+            all_view_metrics = per_view_all_metrics
+            entry.update(all_view_metrics)
+
+        scoped_metrics = {
+            ALL_VIEWS_SCOPE: {
+                "num_views": EXPECTED_TEST_VIEWS,
+                **all_view_metrics,
+            },
+            NOVEL_VIEWS_SCOPE: {
+                "num_views": NOVEL_TEST_VIEWS,
+                **novel_view_metrics,
+            },
+        }
+        for scope, values in scoped_metrics.items():
+            if entry.get(scope) != values:
+                entry[scope] = values
+                changed = True
+
+    if changed:
+        results_path = model_root / "results.json"
+        temp_path = results_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(results, indent=2) + "\n")
+        temp_path.replace(results_path)
+    return changed
 
 
 def load_training_times(model_root: Path) -> Dict:
@@ -281,6 +404,7 @@ def evaluate_missing_iterations(
     eval_iterations: Sequence[int],
     args: argparse.Namespace,
 ) -> None:
+    ensure_metric_scopes(model_root, eval_iterations)
     completed = set(completed_iterations(model_root, eval_iterations))
     missing = [iteration for iteration in eval_iterations if iteration not in completed]
     if not missing:
@@ -308,6 +432,7 @@ def evaluate_missing_iterations(
     run_command(command, env, args.dry_run)
     if args.dry_run:
         return
+    ensure_metric_scopes(model_root, eval_iterations)
 
     remaining = [
         iteration
@@ -327,18 +452,25 @@ def process_scene(
     args: argparse.Namespace,
 ) -> str:
     model_root = args.output_dir / scene_name
+    metrics_updated = ensure_metric_scopes(model_root, eval_iterations)
     completed_metrics = set(completed_iterations(model_root, eval_iterations))
     completed_timings = set(timed_iterations(model_root, eval_iterations))
     if len(completed_metrics) == len(eval_iterations) and len(completed_timings) == len(eval_iterations):
+        if metrics_updated:
+            print(f"Skipping completed experiment; metric scopes updated: {scene_name}", flush=True)
+            return "metrics-updated"
         print(f"Skipping completed scene: {scene_name}", flush=True)
         return "skipped"
 
     scene_dir = loader.scene_path(token)
-    if not args.dry_run:
-        scene_dir = loader.prepare_scene(token, force_rebuild=args.rebuild_cache)
-
     missing_metrics = [iteration for iteration in eval_iterations if iteration not in completed_metrics]
     missing_timings = [iteration for iteration in eval_iterations if iteration not in completed_timings]
+    needs_training = bool(missing_timings) or any(
+        not point_cloud_exists(model_root, iteration) for iteration in missing_metrics
+    )
+    if needs_training and not args.dry_run:
+        scene_dir = loader.prepare_scene(token, force_rebuild=args.rebuild_cache)
+
     train_if_needed(
         gpu, scene_dir, model_root, missing_metrics, missing_timings, eval_iterations, args
     )
@@ -418,39 +550,59 @@ def write_summary(
     args: argparse.Namespace,
 ) -> Path:
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    for scene_name in scene_names:
+        ensure_metric_scopes(args.output_dir / scene_name, eval_iterations)
     per_iteration = {}
     incomplete_scenes = []
 
     for iteration in eval_iterations:
-        values = {name: [] for name in METRIC_NAMES}
+        scoped_values = {
+            scope: {name: [] for name in METRIC_NAMES}
+            for scope in METRIC_SCOPE_VIEW_COUNTS
+        }
+        scoped_missing_metrics = {scope: [] for scope in METRIC_SCOPE_VIEW_COUNTS}
         training_seconds = []
-        missing_metrics = []
         missing_timings = []
         for scene_name in scene_names:
             model_root = args.output_dir / scene_name
-            metrics = get_iteration_metrics(load_results(model_root), iteration)
-            if metrics is None:
-                missing_metrics.append(scene_name)
-            else:
-                for name in METRIC_NAMES:
-                    values[name].append(metrics[name])
+            results = load_results(model_root)
+            for scope in METRIC_SCOPE_VIEW_COUNTS:
+                metrics = get_iteration_metrics(results, iteration, scope)
+                if metrics is None:
+                    scoped_missing_metrics[scope].append(scene_name)
+                else:
+                    for name in METRIC_NAMES:
+                        scoped_values[scope][name].append(metrics[name])
             elapsed_seconds = get_iteration_training_seconds(load_training_times(model_root), iteration)
             if elapsed_seconds is None:
                 missing_timings.append(scene_name)
             else:
                 training_seconds.append(elapsed_seconds)
+        metric_scopes = {}
+        for scope, view_count in METRIC_SCOPE_VIEW_COUNTS.items():
+            values = scoped_values[scope]
+            missing_metrics = scoped_missing_metrics[scope]
+            metric_scopes[scope] = {
+                "num_views_per_scene": view_count,
+                "num_scenes": len(scene_names) - len(missing_metrics),
+                "mean": {
+                    name: (sum(values[name]) / len(values[name]) if values[name] else None)
+                    for name in METRIC_NAMES
+                },
+                "missing_metric_scenes": missing_metrics,
+            }
+        all_views = metric_scopes[ALL_VIEWS_SCOPE]
         per_iteration[str(iteration)] = {
-            "num_scenes": len(scene_names) - len(missing_metrics),
+            # Backward-compatible aliases: these always refer to all 18 test views.
+            "num_scenes": all_views["num_scenes"],
             "num_timed_scenes": len(scene_names) - len(missing_timings),
-            "mean": {
-                name: (sum(values[name]) / len(values[name]) if values[name] else None)
-                for name in METRIC_NAMES
-            },
+            "mean": all_views["mean"],
             "mean_training_seconds": (
                 sum(training_seconds) / len(training_seconds) if training_seconds else None
             ),
-            "missing_metric_scenes": missing_metrics,
+            "missing_metric_scenes": all_views["missing_metric_scenes"],
             "missing_timing_scenes": missing_timings,
+            "metric_scopes": metric_scopes,
         }
 
     for scene_name in scene_names:
@@ -460,10 +612,20 @@ def write_summary(
         missing_metrics = [iteration for iteration in eval_iterations if iteration not in completed_metrics]
         missing_timings = [iteration for iteration in eval_iterations if iteration not in completed_timings]
         if missing_metrics or missing_timings:
+            results = load_results(model_root)
+            missing_metrics_by_scope = {
+                scope: [
+                    iteration
+                    for iteration in eval_iterations
+                    if get_iteration_metrics(results, iteration, scope) is None
+                ]
+                for scope in METRIC_SCOPE_VIEW_COUNTS
+            }
             incomplete_scenes.append(
                 {
                     "scene": scene_name,
                     "missing_metric_iterations": missing_metrics,
+                    "missing_metric_iterations_by_scope": missing_metrics_by_scope,
                     "missing_timing_iterations": missing_timings,
                 }
             )
@@ -475,6 +637,7 @@ def write_summary(
         "completed_scenes": len(scene_names) - len(incomplete_scenes),
         "complete": not incomplete_scenes,
         "eval_iterations": list(eval_iterations),
+        "metric_scope_view_counts": METRIC_SCOPE_VIEW_COUNTS,
         "metrics": per_iteration,
         "incomplete_scenes": incomplete_scenes,
         "job_failures": list(failures),
@@ -488,32 +651,54 @@ def write_summary(
     with csv_path.open("w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(
-            ["iteration", "num_scenes", "num_timed_scenes", "mean_training_seconds", *METRIC_NAMES]
+            [
+                "iteration",
+                f"num_scenes_{ALL_VIEWS_SCOPE}",
+                f"num_scenes_{NOVEL_VIEWS_SCOPE}",
+                "num_timed_scenes",
+                "mean_training_seconds",
+                *[f"{ALL_VIEWS_SCOPE}_{name}" for name in METRIC_NAMES],
+                *[f"{NOVEL_VIEWS_SCOPE}_{name}" for name in METRIC_NAMES],
+            ]
         )
         for iteration in eval_iterations:
             entry = per_iteration[str(iteration)]
             writer.writerow(
                 [
                     iteration,
-                    entry["num_scenes"],
+                    entry["metric_scopes"][ALL_VIEWS_SCOPE]["num_scenes"],
+                    entry["metric_scopes"][NOVEL_VIEWS_SCOPE]["num_scenes"],
                     entry["num_timed_scenes"],
                     entry["mean_training_seconds"],
-                    *[entry["mean"][name] for name in METRIC_NAMES],
+                    *[
+                        entry["metric_scopes"][ALL_VIEWS_SCOPE]["mean"][name]
+                        for name in METRIC_NAMES
+                    ],
+                    *[
+                        entry["metric_scopes"][NOVEL_VIEWS_SCOPE]["mean"][name]
+                        for name in METRIC_NAMES
+                    ],
                 ]
             )
 
     print("\nAggregated results:")
-    print("iteration  scenes  time(s)      PSNR       SSIM       LPIPS")
+    print("iteration  scope             scenes  time(s)      PSNR       SSIM       LPIPS")
     for iteration in eval_iterations:
         entry = per_iteration[str(iteration)]
-        means = entry["mean"]
         mean_time = entry["mean_training_seconds"]
         formatted_time = "N/A" if mean_time is None else f"{mean_time:.3f}"
-        formatted = ["N/A" if means[name] is None else f"{means[name]:.7f}" for name in METRIC_NAMES]
-        print(
-            f"{iteration:>9}  {entry['num_scenes']:>6}  {formatted_time:>10}  "
-            f"{formatted[0]:>9}  {formatted[1]:>9}  {formatted[2]:>9}"
-        )
+        for scope in METRIC_SCOPE_VIEW_COUNTS:
+            scope_entry = entry["metric_scopes"][scope]
+            means = scope_entry["mean"]
+            formatted = [
+                "N/A" if means[name] is None else f"{means[name]:.7f}"
+                for name in METRIC_NAMES
+            ]
+            print(
+                f"{iteration:>9}  {scope:<17}  {scope_entry['num_scenes']:>6}  "
+                f"{formatted_time:>10}  {formatted[0]:>9}  {formatted[1]:>9}  "
+                f"{formatted[2]:>9}"
+            )
     print(f"Summary: {summary_path}")
     return summary_path
 

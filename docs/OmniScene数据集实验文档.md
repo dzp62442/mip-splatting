@@ -145,7 +145,7 @@
 5. **结果产物**：
    - `model_root/point_cloud/iteration_<iter>/...`（高斯模型）
    - `model_root/test/ours_<iter>/...`（渲染结果）
-   - `model_root/results.json`, `per_view.json`（metrics 输出）
+   - `model_root/results.json`, `per_view.json`（18 路全部视角及前 12 路新视角指标）
    - 这些结构与现有脚本保持一致，便于对比分析。
 
 ### 5.1 Center150 对比实验
@@ -160,9 +160,9 @@ python scripts/run_omniscene.py
 
 - 每个场景只训练一次，在 1k、5k、10k 保存 PLY 与训练 checkpoint。
 - 每个场景在 `training_times.json` 中记录从训练开始到 1k、5k、10k 的累计训练耗时；只统计训练循环，不包含评估、渲染、指标计算、PLY/checkpoint 写盘和断点停机时间。
-- 三个迭代点分别执行完整 test split 渲染，并把 PSNR、SSIM、LPIPS 写入场景目录下的 `results.json`。
-- 重启相同命令时，已有完整三组指标和耗时的场景会直接跳过；训练中断时从缺失里程碑之前最新的 `chkpnt*.pth` 恢复；已有渲染、指标和计时记录也会复用。
-- 所有任务结束后，在输出根目录生成 `center150_summary.json` 和 `center150_summary.csv`。二者记录各迭代点的有效场景数、150 场景平均训练耗时和平均指标；若有失败或缺失，JSON 会列出对应场景。
+- 三个迭代点分别执行完整 test split 渲染。每个场景的 `results.json` 同时记录 `all_18_views`（12 路新视角 + 6 路输入视角）与 `novel_12_views`（GT 文件名排序后的前 12 路新视角）的 PSNR、SSIM、LPIPS 均值；原有顶层指标继续表示 18 路均值，兼容已有分析代码。
+- 重启相同命令时，已有训练和渲染结果会直接复用。旧实验若已有完整 `per_view.json`，脚本只读取逐视角指标并补写两套均值，不会重新训练、渲染或运行 LPIPS；训练中断时仍从缺失里程碑之前最新的 `chkpnt*.pth` 恢复。
+- 所有任务结束后，在输出根目录生成 `center150_summary.json` 和 `center150_summary.csv`。二者分别汇总 18 路全部视角和 12 路新视角在各迭代点上的 150 场景平均指标，同时记录平均纯训练耗时；若有失败或缺失，JSON 会按指标范围列出对应场景。
 - 本机使用单卡顺序执行 150 个场景，无需设置 `--max_workers`。
 - 仅当坐标变换或其他缓存生成逻辑发生变化、需要强制重建已有缓存时，额外添加 `--rebuild_cache`。
 
